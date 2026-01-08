@@ -1,22 +1,35 @@
 import json
 import queue
 import sys
+import threading
+import subprocess
+import time
 
 import numpy as np
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 from argostranslate.translate import translate
 
+# -------- Audio config --------
 SAMPLE_RATE = 16000
 BLOCK_MS = 30
 BLOCK_SAMPLES = int(SAMPLE_RATE * BLOCK_MS / 1000)
 
+# -------- Models --------
 MODEL_RU = "Models/vosk-model-small-ru-0.22"
+MODEL_EN = "Models/vosk-model-small-en-us-0.15"  # change to your EN model folder
 
+# -------- VAD-ish thresholds --------
 SILENCE_RMS = 250
 END_SILENCE_MS = 1250
 
+# Push-to-talk behavior
+PTT_SILENCE_GRACE_MS = 250  # small grace to avoid chopping endings
+
 audio_q: queue.Queue[bytes] = queue.Queue()
+
+# Space key state for pressing space
+ptt_active = threading.Event()      # toggled ON/OFF by space press
 
 
 def cb(indata, frames, time_info, status):
@@ -47,15 +60,71 @@ def avg_conf(words) -> float:
     return (sum(confs) / len(confs)) if confs else 0.0
 
 
+def tts_ru(text: str):
+    """
+    Lightweight Russian TTS via espeak-ng.
+    Tune voice/speed as you like.
+    """
+    if not text.strip():
+        return
+    # -v ru : Russian voice (may vary by system)
+    # -s 165 : speed
+    try:
+        subprocess.run(
+            ["espeak-ng", "-v", "ru", "-s", "165", text],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        print("TTS missing: install espeak-ng, or replace tts_ru() with your TTS.", file=sys.stderr)
+
+
+def start_space_listener():
+    """
+    Toggle SPACE: press once to start EN, press again to stop EN.
+    """
+    from pynput import keyboard
+
+    def on_press(key):
+        try:
+            if key == keyboard.Key.space:
+                # toggle
+                if ptt_active.is_set():
+                    ptt_active.clear()
+                else:
+                    ptt_active.set()
+        except Exception:
+            pass
+
+    listener = keyboard.Listener(on_press=on_press)  # no on_release
+    listener.daemon = True
+    listener.start()
+    return listener
+
 def main():
     print("Loading RU model...")
     m_ru = Model(MODEL_RU)
     rec_ru = KaldiRecognizer(m_ru, SAMPLE_RATE)
 
-    in_speech = False
-    silence_ms = 0
+    print("Loading EN model...")
+    m_en = Model(MODEL_EN)
+    rec_en = KaldiRecognizer(m_en, SAMPLE_RATE)
 
+    # Start keyboard UI
+    start_space_listener()
+    print("UI: hold SPACE to push-to-talk in English (release to translate EN->RU + speak).")
+    print("Default: listens for Russian, prints RU->EN on utterance end.")
     print("Listening (Ctrl+C to stop).")
+
+    # RU state
+    ru_in_speech = False
+    ru_silence_ms = 0
+
+    # EN push-to-talk state
+    en_active = False
+    en_last_voice_ms = 0  # for a tiny grace period
+
     with sd.RawInputStream(
         samplerate=SAMPLE_RATE,
         blocksize=BLOCK_SAMPLES,
@@ -68,29 +137,81 @@ def main():
             level = rms_int16_bytes(b)
             is_voice = level >= SILENCE_RMS
 
+            # -------- Push-to-talk EN path (SPACE held) --------
+            if ptt_active.is_set():
+                # While holding space, we prioritize EN recognition.
+                if not en_active:
+                    en_active = True
+                    rec_en.Reset()
+                    en_last_voice_ms = 0
+                    # Optional: visual cue
+                    print("\n[PTT EN] Listening...", flush=True)
+
+                rec_en.AcceptWaveform(b)
+                if is_voice:
+                    en_last_voice_ms = 0
+                else:
+                    en_last_voice_ms += BLOCK_MS
+
+                # While EN PTT is active, we do NOT advance RU utterance state
+                # (prevents the two recognizers competing for the same audio).
+                continue
+
+            # If we just released space, finalize EN and speak RU translation
+            if en_active and not ptt_active.is_set():
+                # Small grace: if user released during quiet gap, still accept a few blocks
+                # (helps catch trailing consonants). This is optional.
+                grace_blocks = int(PTT_SILENCE_GRACE_MS / BLOCK_MS)
+                for _ in range(grace_blocks):
+                    try:
+                        b2 = audio_q.get_nowait()
+                        rec_en.AcceptWaveform(b2)
+                    except queue.Empty:
+                        break
+
+                en_final = rec_en.FinalResult()
+                en_text, en_words = parse_text(en_final)
+                en_conf = avg_conf(en_words)
+
+                if en_text:
+                    ru_out = translate(en_text, "en", "ru")
+                    print(f"[FINAL en {en_conf:.2f}] {en_text}")
+                    print(f"[EN->RU] {ru_out}")
+                    tts_ru(ru_out)
+                else:
+                    print("[PTT EN] (no text)")
+
+                en_active = False
+                # After PTT ends, we fall back to RU mode fresh
+                ru_in_speech = False
+                ru_silence_ms = 0
+                rec_ru.Reset()
+                continue
+
+            # -------- Default RU path (hands-free) --------
             if is_voice:
-                if not in_speech:
-                    in_speech = True
-                    silence_ms = 0
+                if not ru_in_speech:
+                    ru_in_speech = True
+                    ru_silence_ms = 0
                     rec_ru.Reset()
                 rec_ru.AcceptWaveform(b)
 
             else:
-                if in_speech:
+                if ru_in_speech:
                     rec_ru.AcceptWaveform(b)
-                    silence_ms += BLOCK_MS
+                    ru_silence_ms += BLOCK_MS
 
-                    if silence_ms >= END_SILENCE_MS:
+                    if ru_silence_ms >= END_SILENCE_MS:
                         ru_final = rec_ru.FinalResult()
-                        text, words = parse_text(ru_final)
-                        conf = avg_conf(words)
-                        en = translate(text, "ru", "en")
+                        ru_text, ru_words = parse_text(ru_final)
+                        ru_conf = avg_conf(ru_words)
 
-                        if text:
-                            print(f"[FINAL ru {conf:.2f}] {en}")
+                        if ru_text:
+                            en_out = translate(ru_text, "ru", "en")
+                            print(f"[FINAL ru {ru_conf:.2f}] {en_out}")
 
-                        in_speech = False
-                        silence_ms = 0
+                        ru_in_speech = False
+                        ru_silence_ms = 0
 
 
 if __name__ == "__main__":
