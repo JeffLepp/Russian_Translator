@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Vosk models (large, should not be in git)
+Models/
+vosk-model-*/
+
+# Argos Translate packages
+.argos-translate/
+argos_packages/
+
+# Audio / temp
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
