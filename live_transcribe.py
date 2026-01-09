@@ -4,6 +4,7 @@ import sys
 import threading
 import subprocess
 import time
+import re
 
 import numpy as np
 import sounddevice as sd
@@ -59,25 +60,65 @@ def avg_conf(words) -> float:
     confs = [w.get("conf", 0.0) for w in words if isinstance(w, dict)]
     return (sum(confs) / len(confs)) if confs else 0.0
 
+def tts_text_cleanup(text: str) -> str:
+    text = text.strip()
+    # Remove repeated spaces
+    text = re.sub(r"\s+", " ", text)
+    # Replace problematic punctuation for espeak
+    text = text.replace("—", ", ").replace("–", ", ")
+    text = text.replace("…", ".")
+    # Optional: avoid reading quotes/brackets weirdly
+    text = text.replace("«", "").replace("»", "")
+    text = re.sub(r"[\[\]{}<>]", "", text)
+    return text
+
 
 def tts_ru(text: str):
-    """
-    Lightweight Russian TTS via espeak-ng.
-    Tune voice/speed as you like.
-    """
     if not text.strip():
         return
-    # -v ru : Russian voice (may vary by system)
-    # -s 165 : speed
+    text = tts_text_cleanup(text)
+
     try:
         subprocess.run(
-            ["espeak-ng", "-v", "ru", "-s", "165", text],
+            ["espeak-ng", "-v", "ru+f3", "-s", "155", "-p", "55", "-a", "170", text],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        print("TTS missing: install espeak-ng, or replace tts_ru() with your TTS.", file=sys.stderr)
+        print("TTS missing: install espeak-ng.", file=sys.stderr)
+
+def speak_chunks_espeak(text: str, max_len: int = 180):
+    text = tts_text_cleanup(text)
+    if not text:
+        return
+
+    parts = []
+    cur = ""
+    for token in text.split(" "):
+        if len(cur) + 1 + len(token) > max_len:
+            if cur:
+                parts.append(cur)
+            cur = token
+        else:
+            cur = (cur + " " + token).strip()
+    if cur:
+        parts.append(cur)
+
+    for p in parts:
+        subprocess.run(
+            [
+                "espeak-ng",      # TTS engine executable
+                "-v", "ru+f3",    # voice: Russian (+f3 = female variant)
+                "-s", "155",      # speed: words per minute (140–170 is natural)
+                "-p", "55",       # pitch: mid-range, avoids robotic tone
+                "-a", "170",      # amplitude: volume (100–200 typical)
+                p                # chunk to speak (IMPORTANT: use p, not text)
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def start_space_listener():
@@ -177,7 +218,9 @@ def main():
                     ru_out = translate(en_text, "en", "ru")
                     print(f"[FINAL en {en_conf:.2f}] {en_text}")
                     print(f"[EN->RU] {ru_out}")
-                    tts_ru(ru_out)
+                    # tts_ru(ru_out)
+                    speak_chunks_espeak(ru_out)
+
                 else:
                     print("[PTT EN] (no text)")
 
