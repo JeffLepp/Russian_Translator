@@ -219,20 +219,33 @@ def chunk_text(text: str, max_len: int = 140) -> list[str]:
     return [p.rstrip(",") + ("" if p.endswith((".", "!", "?")) else ".") for p in parts]
 
 
-def _pick_player():
-    # PipeWire: pw-cat supports stdin streaming
-    if shutil.which("pw-cat"):
-        return (
-            ["pw-cat", "--playback", "--rate", str(PIPER_SAMPLE_RATE), "--channels", "1", "--format", "s16le"],
-            "raw",
-        )
+# def _pick_player():
+#     # PipeWire: pw-cat supports stdin streaming
+#     if shutil.which("pw-cat"):
+#         return (
+#             ["pw-cat", "--playback", "--rate", str(PIPER_SAMPLE_RATE), "--channels", "1", "--format", "s16le"],
+#             "raw",
+#         )
 
-    # PulseAudio / PipeWire-Pulse (WAV file)
-    if shutil.which("paplay"):
-        return (["paplay"], "wav")
+#     # PulseAudio / PipeWire-Pulse (WAV file)
+#     if shutil.which("paplay"):
+#         return (["paplay"], "wav")
 
-    # ALSA raw stdin
-    return (["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(PIPER_SAMPLE_RATE), "-c", "1"], "raw")
+#     # ALSA raw stdin
+#     return (["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(PIPER_SAMPLE_RATE), "-c", "1"], "raw")
+
+def play_raw_int16_bytes(raw_iter, samplerate: int):
+    # Full-duplex is fine: you already use sounddevice for mic input.
+    with sd.RawOutputStream(
+        samplerate=int(samplerate),
+        dtype="int16",
+        channels=1,
+        blocksize=0,  # let PortAudio choose
+    ) as out:
+        for chunk in raw_iter:
+            if not chunk:
+                break
+            out.write(chunk)
 
 
 # -----------------------------
@@ -281,54 +294,16 @@ def speak_piper_stream(text: str) -> None:
         p.stdin.flush()
         p.stdin.close()
 
-        player_cmd, mode = _pick_player()
+        # Stream Piper raw PCM directly to speakers using sounddevice
+        def raw_chunks():
+            while True:
+                c = p.stdout.read(4096)
+                if not c:
+                    break
+                yield c
 
-        if mode == "raw":
-            a = subprocess.Popen(
-                player_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                assert a.stdin is not None
-                while True:
-                    chunk = p.stdout.read(4096)
-                    if not chunk:
-                        break
-                    a.stdin.write(chunk)
-            finally:
-                try:
-                    a.stdin.close()
-                except Exception:
-                    pass
-                try:
-                    a.wait(timeout=10)
-                except Exception:
-                    try:
-                        a.kill()
-                    except Exception:
-                        pass
+        play_raw_int16_bytes(raw_chunks(), PIPER_SAMPLE_RATE)
 
-        else:
-            # mode == "wav" (paplay): write a tiny temp WAV then play it
-            raw = p.stdout.read()
-            if not raw:
-                return
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-                wav_path = tf.name
-            try:
-                with wave.open(wav_path, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)  # int16
-                    wf.setframerate(int(PIPER_SAMPLE_RATE))
-                    wf.writeframes(raw)
-                subprocess.run(player_cmd + [wav_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            finally:
-                try:
-                    os.remove(wav_path)
-                except Exception:
-                    pass
 
     except Exception:
         # drop utterance silently
@@ -455,7 +430,7 @@ def main():
 
     start_space_listener()
     start_tts_worker()
-    say_ru(STARTUP_TTS_TEST) ##### TTS STARTUP CHECK: OUTPUTS EXAMPLE AT STARTUP
+    # say_ru(STARTUP_TTS_TEST) ##### TTS STARTUP CHECK: OUTPUTS EXAMPLE AT STARTUP
 
     print("UI: press SPACE once to start EN PTT, press again to stop (EN->RU + speak).")
     print("Default: listens for Russian, prints RU->EN on utterance end.")
