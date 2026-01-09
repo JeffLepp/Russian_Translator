@@ -72,7 +72,7 @@ def tts_text_cleanup(text: str) -> str:
     text = re.sub(r"[\[\]{}<>]", "", text)
     return text
 
-
+# This is legacy TTS function
 def tts_ru(text: str):
     if not text.strip():
         return
@@ -88,6 +88,7 @@ def tts_ru(text: str):
     except FileNotFoundError:
         print("TTS missing: install espeak-ng.", file=sys.stderr)
 
+# This is the currently used TTS function
 def speak_chunks_espeak(text: str, max_len: int = 180):
     text = tts_text_cleanup(text)
     if not text:
@@ -110,9 +111,9 @@ def speak_chunks_espeak(text: str, max_len: int = 180):
             [
                 "espeak-ng",      # TTS engine executable
                 "-v", "ru+f3",    # voice: Russian (+f3 = female variant)
-                "-s", "155",      # speed: words per minute (140–170 is natural)
-                "-p", "55",       # pitch: mid-range, avoids robotic tone
-                "-a", "170",      # amplitude: volume (100–200 typical)
+                "-s", "120",      # speed: words per minute (140–170 is natural)
+                "-p", "25",       # pitch: mid-range, avoids robotic tone
+                "-a", "120",      # amplitude: volume (100–200 typical)
                 p                # chunk to speak (IMPORTANT: use p, not text)
             ],
             check=False,
@@ -219,8 +220,7 @@ def main():
                     print(f"[FINAL en {en_conf:.2f}] {en_text}")
                     print(f"[EN->RU] {ru_out}")
                     # tts_ru(ru_out)
-                    speak_chunks_espeak(ru_out)
-
+                    speak_chunks_espeak(ru_out, 500)
                 else:
                     print("[PTT EN] (no text)")
 
