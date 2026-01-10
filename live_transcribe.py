@@ -8,11 +8,14 @@ import sys
 import threading
 import wave
 import tempfile
+import time
 
 import numpy as np
 import sounddevice as sd
 from argostranslate.translate import translate
 from vosk import KaldiRecognizer, Model
+
+import contextlib
 
 # -----------------------------
 # Config
@@ -38,7 +41,7 @@ PIPER_NOISE_W = 0.65        # prosody timing; try 0.60..0.95
 # -----------------------------
 # Globals / state
 # -----------------------------
-audio_q: queue.Queue[bytes] = queue.Queue()
+audio_q: queue.Queue[bytes] = queue.Queue(maxsize=80)
 ptt_active = threading.Event()  # toggled by space press
 tts_q: queue.Queue[str] = queue.Queue(maxsize=8)  # TTS worker queue
 
@@ -58,6 +61,24 @@ STARTUP_TTS_TEST = (
     "Если ты слышишь это, значит всё работает нормально, "
     "и голос загружен корректно."
 )
+
+tts_playing = threading.Event()
+tts_mute_until = 0.0
+TTS_POST_MUTE_MS = 600  # bump if it still hears itself
+
+def audio_cb(indata, frames, time_info, status):
+    if status:
+        print(status, file=sys.stderr)
+
+    now = time.monotonic()
+    if tts_playing.is_set() or now < tts_mute_until:
+        return
+
+    b = bytes(indata)
+    try:
+        audio_q.put_nowait(b)
+    except queue.Full:
+        pass
 
 
 # -----------------------------
@@ -96,10 +117,6 @@ def init_piper() -> None:
     global PIPER_SAMPLE_RATE
 
     _require_file(PIPER_BIN, "Piper TTS binary (.venv/bin/piper)")
-    if not (shutil.which("pw-cat") or shutil.which("paplay") or shutil.which("aplay")):
-        _fatal("No audio player found (need pw-cat or paplay or aplay)")
-
-
     _require_file(PIPER_MODEL_PATH, "Piper model")
     _require_file(PIPER_CONFIG_PATH, "Piper model config (.onnx.json)")
 
@@ -119,12 +136,6 @@ def init_piper() -> None:
 # -----------------------------
 # Audio helpers
 # -----------------------------
-def audio_cb(indata, frames, time_info, status):
-    if status:
-        # keep it minimal; status goes to stderr
-        print(status, file=sys.stderr)
-    audio_q.put(bytes(indata))
-
 
 def rms_int16_bytes(b: bytes) -> float:
     x = np.frombuffer(b, dtype=np.int16).astype(np.float32)
@@ -235,18 +246,43 @@ def chunk_text(text: str, max_len: int = 140) -> list[str]:
 #     return (["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(PIPER_SAMPLE_RATE), "-c", "1"], "raw")
 
 def play_raw_int16_bytes(raw_iter, samplerate: int):
-    # Full-duplex is fine: you already use sounddevice for mic input.
-    with sd.RawOutputStream(
-        samplerate=int(samplerate),
-        dtype="int16",
-        channels=1,
-        blocksize=0,  # let PortAudio choose
-    ) as out:
-        for chunk in raw_iter:
-            if not chunk:
-                break
-            out.write(chunk)
+    global tts_mute_until
+    tts_playing.set()
+    try:
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            with sd.RawOutputStream(
+                samplerate=int(samplerate),
+                dtype="int16",
+                channels=1,
+                blocksize=8192,
+                latency="high",
+            ) as out:
+                carry = b""
+                for chunk in raw_iter:
+                    if not chunk:
+                        break
+                    chunk = carry + chunk
 
+                    if len(chunk) & 1:
+                        carry = chunk[-1:]
+                        chunk = chunk[:-1]
+                    else:
+                        carry = b""
+
+                    if chunk:
+                        out.write(chunk)
+
+                # IMPORTANT: wait until all queued audio is actually played
+                                # Pad a short silence tail so final phonemes aren't clipped
+                tail_ms = 1000
+                tail_frames = int(samplerate * tail_ms / 1000)
+                out.write(b"\x00\x00" * tail_frames)
+
+                out.stop()
+
+    finally:
+        tts_playing.clear()
+        tts_mute_until = time.monotonic() + (TTS_POST_MUTE_MS / 1000.0)
 
 # -----------------------------
 # Piper TTS (streaming, no fallback)
@@ -309,13 +345,15 @@ def speak_piper_stream(text: str) -> None:
         # drop utterance silently
         pass
     finally:
+        # Let Piper finish; don't truncate long chunks.
         try:
-            p.wait(timeout=10)
+            p.wait(timeout=120)   # or just p.wait() with no timeout
         except Exception:
             try:
                 p.kill()
             except Exception:
                 pass
+
 
 
 def tts_worker():
@@ -337,25 +375,28 @@ def start_tts_worker():
 
 
 def say_ru(text: str):
-    """
-    Queue Russian speech. Drops oldest if full so output stays live.
-    Uses chunking so Piper speaks naturally instead of word-by-word.
-    """
-    for p in chunk_text(text, max_len=160):
+    parts = chunk_text(text, max_len=160)
+    for i, p in enumerate(parts):
         if not p:
             continue
-        try:
-            tts_q.put_nowait(p)
-        except queue.Full:
-            try:
-                _ = tts_q.get_nowait()
-                tts_q.task_done()
-            except queue.Empty:
-                pass
+
+        is_last = (i == len(parts) - 1)
+
+        if is_last:
+            # Wait a bit to guarantee the final chunk goes out
+            tts_q.put(p)  # blocking
+            continue
+
+        # For non-last chunks: keep it live, drop oldest if needed
+        while True:
             try:
                 tts_q.put_nowait(p)
+                break
             except queue.Full:
-                pass
+                try:
+                    _ = tts_q.get_nowait()
+                except queue.Empty:
+                    break
 
 
 # -----------------------------
