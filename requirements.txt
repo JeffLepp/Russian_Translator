@@ -1,0 +1,11 @@
+
+---
+
+## `requirements.txt`
+
+```txt
+numpy
+sounddevice
+vosk
+argostranslate
+pynput
