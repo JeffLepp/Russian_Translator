@@ -1,8 +1,10 @@
+Dedicated to my Kazakh grandparents — built so we can talk almost seamlessly.
+
 # Realtime RU ↔ EN Speech Translator (Vosk + Argos Translate + Piper TTS)
 
 A realtime speech tool that:
 - **Always listens for Russian** (hands-free) and prints **RU → EN** when you stop speaking.
-- Supports **English push-to-talk (SPACE)**: speak English, release SPACE, it translates **EN → RU** and **speaks Russian** using **Piper TTS**.
+- **Reading translates English to Russian TTS**: press space to begin speaking English and press space again when finished speaking. Translates **EN → RU** and **speaks Russian** using **Piper TTS**.
 
 
 
