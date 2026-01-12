@@ -1,4 +1,4 @@
-Dedicated to my Kazakh grandparents — built so we have an easier time talking without having them relying on 3rd party software.
+Dedicated to my Kazakh grandparents — built so we have an easier time talking without them relying on 3rd party software. Still a work in progress, feel free to make improvements.
 
 # Realtime RU ↔ EN Speech Translator (Vosk + Argos Translate + Piper TTS)
 
