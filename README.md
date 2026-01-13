@@ -1,12 +1,11 @@
-Dedicated to my Kazakh grandparents — built so we have an easier time talking without them relying on 3rd party software. Still a work in progress, feel free to make improvements.
+# Real-Time RU ↔ EN Speech Translation System 
 
-# Realtime RU ↔ EN Speech Translator (Vosk + Argos Translate + Piper TTS)
+An offline, real-time speech translation pipeline combining automatic speech recognition (ASR),
+neural machine translation (NMT), and neural text-to-speech (TTS). Designed for low-latency,
+interactive use on consumer hardware without relying on cloud services.
 
-A realtime speech tool that:
 - **Always listens for Russian** (hands-free) and prints **RU → EN** when you stop speaking.
-- **Reading translates English to Russian TTS**: press space to begin speaking English and press space again when finished speaking. Translates **EN → RU** and **speaks Russian** using **Piper TTS**.
-
-
+- **Push-to-talk English mode** press space to speak English, translate EN → RU, and synthesize Russian speech using Piper TTS.
 
 ## Features
 
@@ -18,30 +17,16 @@ A realtime speech tool that:
 - Built-in mic-mute during TTS playback to reduce self-listening feedback
 
 
+## ML Architecture
 
-## Project layout
+Audio Input
+→ Voice Activity Detection
+→ ASR (Vosk)
+→ NMT (Argos / Marian)
+→ Neural TTS (Piper)
+→ Audio Output
 
-Expected folder structure:
-
-project/
-main.py
-Models/
-vosk-model-small-ru-0.22/
-...
-vosk-model-small-en-us-0.15/
-...
-piper/
-ru_RU/irina/medium/
-ru_RU-irina-medium.onnx
-ru_RU-irina-medium.onnx.json
-
-> The script expects these exact default paths:
-- Models/vosk-model-small-ru-0.22
-- Models/vosk-model-small-en-us-0.15
-- Models/piper/ru_RU/irina/medium/ru_RU-irina-medium.onnx
-- plus sibling config: ru_RU-irina-medium.onnx.json
-
-
+The system prioritizes **low-latency model inference, offline operation, and robustness during continuous audio streaming**.
 
 ## Requirements
 
@@ -51,14 +36,19 @@ ru_RU-irina-medium.onnx.json
   - Linux/macOS venv: .venv/bin/piper
   - (Adjust in code if your layout differs)
 
-Python deps are installed via `requirements.txt` (below).
+## Performance Notes
+
+Typical end-to-end latency is approximately 1–2 seconds per spoken phrase on consumer CPU
+hardware, depending on model size and audio conditions. Latency is managed through adaptive 
+buffering and silence-based segmentation to balance responsiveness with transcription accuracy.
+
+## Project Structure
+
+src/ contains the real-time inference pipeline and orchestration logic.
+models/ contains local ASR and TTS model files (not included in repo).
+The system is modularized around ASR, NMT, and TTS boundaries for clarity
+and extensibility.
 
 
-
-## Install
-
-Create/activate a venv, then:
-
-```
-pip install -r requirements.txt
-```
+Dedicated to my Kazakh grandparents — built so we have an easier time talking without them relying on 3rd party software. 
+Still a work in progress, feel free to make improvements.
